@@ -5,10 +5,9 @@ from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-import redis.asyncio as redis
 import logging
 
-# Fix for web3.py import (compatibility fix)
+# Web3 import fix
 try:
     from web3 import Web3
 except ImportError:
@@ -16,65 +15,62 @@ except ImportError:
     subprocess.check_call(['pip', 'install', '--upgrade', 'setuptools'])
     from web3 import Web3
 
-# Load environment variables
+# Environment variables
 load_dotenv()
 
-# Setup logging
+# Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Web3 connections with better error handling
+# Web3 bağlantıları
 try:
     eth_w3 = Web3(Web3.HTTPProvider(os.getenv('ETH_RPC_URL')))
     bsc_w3 = Web3(Web3.HTTPProvider(os.getenv('BSC_RPC_URL')))
     
-    # Test connections
     if eth_w3.is_connected():
-        logger.info("✅ Connected to Ethereum")
+        logger.info("✅ Ethereum'a bağlandı")
     else:
-        logger.warning("⚠️ Failed to connect to Ethereum")
+        logger.warning("⚠️ Ethereum bağlantısı başarısız")
     
     if bsc_w3.is_connected():
-        logger.info("✅ Connected to BSC")
+        logger.info("✅ BSC'ye bağlandı")
     else:
-        logger.warning("⚠️ Failed to connect to BSC")
+        logger.warning("⚠️ BSC bağlantısı başarısız")
         
 except Exception as e:
-    logger.error(f"Web3 initialization error: {e}")
+    logger.error(f"Web3 başlatma hatası: {e}")
     eth_w3 = None
     bsc_w3 = None
 
-# Initialize Redis (with fallback for local testing)
+# Redis bağlantısı (opsiyonel)
 try:
+    import redis.asyncio as redis
     redis_client = redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379/0'), decode_responses=True)
 except Exception as e:
-    logger.warning(f"Redis not available, using in-memory storage: {e}")
+    logger.warning(f"Redis kullanılamıyor, hafıza içi depolama kullanılıyor: {e}")
     redis_client = None
 
-# Gas price thresholds
+# Gaz fiyat eşikleri
 GAS_THRESHOLDS = {
-    'eth': {'low': 20, 'medium': 40, 'high': 60},
-    'bsc': {'low': 3, 'medium': 6, 'high': 10}
+    'eth': {'dusuk': 20, 'orta': 40, 'yuksek': 60},
+    'bsc': {'dusuk': 3, 'orta': 6, 'yuksek': 10}
 }
 
-# In-memory fallback if Redis isn't available
+# Redis yoksa yedek depolama
 alerts = {}
 
-# Helper function to get gas prices
+# Gaz fiyatlarını al
 def get_gas_prices():
     if eth_w3 is None or bsc_w3 is None:
-        # Return mock data if Web3 not connected
         return {'eth': round(random.uniform(15, 45), 2), 'bsc': round(random.uniform(3, 8), 2)}
     
     try:
-        # ETH Gas
         eth_gas = eth_w3.eth.gas_price
         eth_gwei = eth_w3.from_wei(eth_gas, 'gwei')
         
-        # BSC Gas
         bsc_gas = bsc_w3.eth.gas_price
         bsc_gwei = bsc_w3.from_wei(bsc_gas, 'gwei')
         
@@ -83,28 +79,16 @@ def get_gas_prices():
             'bsc': round(bsc_gwei, 2)
         }
     except Exception as e:
-        logger.error(f"Error fetching gas prices: {e}")
+        logger.error(f"Gaz fiyatı çekme hatası: {e}")
         return {'eth': round(random.uniform(15, 45), 2), 'bsc': round(random.uniform(3, 8), 2)}
 
-# Helper function to get historical gas (simulated)
+# Geçmiş gaz verileri (simüle)
 def get_historical_gas(chain):
-    if redis_client:
-        key = f"gas_history_{chain}"
-        history = []
-        try:
-            # Try to get from Redis
-            async def get_history():
-                return await redis_client.lrange(key, 0, 23)
-            # This is simplified - in production you'd handle async properly
-        except:
-            pass
-    
-    # Generate mock historical data
     base_price = 30 if chain == 'eth' else 5
     history = [str(round(base_price + random.uniform(-10, 15), 2)) for _ in range(24)]
     return [float(h) for h in history]
 
-# Store user alert (works with or without Redis)
+# Alarm ayarla
 def set_alert(user_id, chain, price):
     alert_key = f"{user_id}_{chain}"
     if redis_client:
@@ -116,7 +100,7 @@ def set_alert(user_id, chain, price):
     else:
         alerts[alert_key] = price
 
-# Get user alert
+# Alarmı al
 def get_alert(user_id, chain):
     alert_key = f"{user_id}_{chain}"
     if redis_client:
@@ -127,7 +111,7 @@ def get_alert(user_id, chain):
             return alerts.get(alert_key)
     return alerts.get(alert_key)
 
-# Remove user alert
+# Alarmı sil
 def remove_alert(user_id, chain):
     alert_key = f"{user_id}_{chain}"
     if redis_client:
@@ -139,65 +123,65 @@ def remove_alert(user_id, chain):
     else:
         alerts.pop(alert_key, None)
 
-# Start command
+# /start komutu
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     welcome_text = (
-        f"⛽ *Welcome to GasGuruBot, {user.first_name}!* ⛽\n\n"
-        "I monitor ETH and BSC gas prices in real-time.\n"
-        "Here's what I can do for you:\n\n"
-        "🔥 `/gas` - Check current gas prices\n"
-        "🔔 `/alert <price>` - Set alert for ETH gas (e.g., /alert 20)\n"
-        "📊 `/trend` - View 24-hour gas trend\n"
-        "💡 `/recommend` - Get transaction recommendations\n"
-        "ℹ️ `/about` - About this bot\n\n"
-        "_Built for Web3 degens by a Telegram Expert 🚀_"
+        f"⛽ *GasGuruBot'a Hoş Geldin, {user.first_name}!* ⛽\n\n"
+        "ETH ve BSC gaz fiyatlarını gerçek zamanlı olarak takip ediyorum.\n"
+        "Yapabileceklerim:\n\n"
+        "🔥 `/gas` - Güncel gaz fiyatlarını göster\n"
+        "🔔 `/alert <fiyat>` - Gaz alarmı ayarla (örnek: /alert 20)\n"
+        "📊 `/trend` - 24 saatlik gaz trendini göster\n"
+        "💡 `/recommend` - İşlem önerisi al\n"
+        "ℹ️ `/about` - Bot hakkında bilgi\n\n"
+        "_Web3 uzmanı tarafından geliştirildi 🚀_"
     )
     keyboard = [
-        [InlineKeyboardButton("⛽ Check Gas", callback_data='check_gas')],
-        [InlineKeyboardButton("📊 View Trend", callback_data='view_trend')],
-        [InlineKeyboardButton("💡 Get Recommendation", callback_data='get_recommend')]
+        [InlineKeyboardButton("⛽ Gaz Fiyatları", callback_data='check_gas')],
+        [InlineKeyboardButton("📊 Trend Göster", callback_data='view_trend')],
+        [InlineKeyboardButton("💡 Öneri Al", callback_data='get_recommend')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
 
-# Gas command
+# /gas komutu
 async def gas(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Fetching latest gas prices...")
+    await update.message.reply_text("⏳ En son gaz fiyatları alınıyor...")
     
     prices = get_gas_prices()
     if not prices:
-        await update.message.reply_text("❌ Error fetching gas prices. Please try again.")
+        await update.message.reply_text("❌ Gaz fiyatları alınamadı. Lütfen tekrar deneyin.")
         return
     
-    eth_status = "🟢 Low" if prices['eth'] <= GAS_THRESHOLDS['eth']['low'] else "🟡 Medium" if prices['eth'] <= GAS_THRESHOLDS['eth']['medium'] else "🔴 High"
-    bsc_status = "🟢 Low" if prices['bsc'] <= GAS_THRESHOLDS['bsc']['low'] else "🟡 Medium" if prices['bsc'] <= GAS_THRESHOLDS['bsc']['medium'] else "🔴 High"
+    eth_status = "🟢 Düşük" if prices['eth'] <= GAS_THRESHOLDS['eth']['dusuk'] else "🟡 Orta" if prices['eth'] <= GAS_THRESHOLDS['eth']['orta'] else "🔴 Yüksek"
+    bsc_status = "🟢 Düşük" if prices['bsc'] <= GAS_THRESHOLDS['bsc']['dusuk'] else "🟡 Orta" if prices['bsc'] <= GAS_THRESHOLDS['bsc']['orta'] else "🔴 Yüksek"
     
     message = (
-        f"⛽ *Current Gas Prices* ⛽\n\n"
+        f"⛽ *Güncel Gaz Fiyatları* ⛽\n\n"
         f"🟣 *Ethereum:* `{prices['eth']} Gwei`\n"
-        f"Status: {eth_status}\n\n"
+        f"Durum: {eth_status}\n\n"
         f"🟡 *BSC:* `{prices['bsc']} Gwei`\n"
-        f"Status: {bsc_status}\n\n"
-        f"_Updated: {datetime.now().strftime('%H:%M:%S')}_"
+        f"Durum: {bsc_status}\n\n"
+        f"_Güncelleme: {datetime.now().strftime('%H:%M:%S')}_"
     )
     
     keyboard = [
-        [InlineKeyboardButton("🔄 Refresh", callback_data='refresh_gas')],
-        [InlineKeyboardButton("🔔 Set Alert", callback_data='set_alert')]
+        [InlineKeyboardButton("🔄 Yenile", callback_data='refresh_gas')],
+        [InlineKeyboardButton("🔔 Alarm Ayarla", callback_data='set_alert')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
 
-# Alert command
+# /alert komutu
 async def set_alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     if not context.args:
         await update.message.reply_text(
-            "❌ Please specify a gas price.\n"
-            "Example: `/alert 20` (will alert when ETH gas drops below 20 Gwei)\n\n"
-            "You can also set BSC alerts: `/alert bsc 3`"
+            "❌ Lütfen bir gaz fiyatı belirtin.\n"
+            "Örnek: `/alert 20` (ETH gazı 20 Gwei altına düştüğünde alarm verir)\n\n"
+            "BSC için: `/alert bsc 3`"
         )
         return
     
@@ -209,7 +193,7 @@ async def set_alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chain = args[0].lower()
         price = args[1]
         if chain not in ['eth', 'bsc']:
-            await update.message.reply_text("❌ Chain must be 'eth' or 'bsc'")
+            await update.message.reply_text("❌ Zincir 'eth' veya 'bsc' olmalıdır")
             return
     
     try:
@@ -217,45 +201,44 @@ async def set_alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if price <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ Please enter a valid positive number")
+        await update.message.reply_text("❌ Lütfen geçerli bir pozitif sayı girin")
         return
     
     set_alert(user_id, chain, price)
     
     chain_name = "Ethereum" if chain == 'eth' else "BSC"
     await update.message.reply_text(
-        f"✅ Alert set!\n\n"
-        f"You will be notified when {chain_name} gas drops below `{price} Gwei`\n\n"
-        f"To remove alert: `/remove_alert {chain}`"
+        f"✅ Alarm ayarlandı!\n\n"
+        f"{chain_name} gazı `{price} Gwei` altına düştüğünde bildirim alacaksınız.\n\n"
+        f"Alarmı kaldırmak için: `/remove_alert {chain}`"
     )
 
-# Remove alert command
+# /remove_alert komutu
 async def remove_alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chain = context.args[0].lower() if context.args else 'eth'
     
     if chain not in ['eth', 'bsc']:
-        await update.message.reply_text("❌ Chain must be 'eth' or 'bsc'")
+        await update.message.reply_text("❌ Zincir 'eth' veya 'bsc' olmalıdır")
         return
     
     remove_alert(user_id, chain)
     chain_name = "Ethereum" if chain == 'eth' else "BSC"
-    await update.message.reply_text(f"✅ Alert for {chain_name} removed successfully!")
+    await update.message.reply_text(f"✅ {chain_name} alarmı başarıyla kaldırıldı!")
 
-# Trend command
+# /trend komutu
 async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📊 Generating gas trend...")
+    await update.message.reply_text("📊 Gaz trendi oluşturuluyor...")
     
     eth_history = get_historical_gas('eth')
     bsc_history = get_historical_gas('bsc')
     
-    # Create simple ASCII chart
-    eth_trend = "📈 ETH Trend (last 24h):\n"
-    for i, price in enumerate(eth_history[-12:]):  # Last 12 hours
+    eth_trend = "📈 ETH Trendi (son 24 saat):\n"
+    for i, price in enumerate(eth_history[-12:]):
         bars = int(price / 3) if price > 0 else 1
         eth_trend += f"{i+1:2}h: {'█' * bars} {price} Gwei\n"
     
-    bsc_trend = "\n📊 BSC Trend (last 24h):\n"
+    bsc_trend = "\n📊 BSC Trendi (son 24 saat):\n"
     for i, price in enumerate(bsc_history[-12:]):
         bars = int(price * 2) if price > 0 else 1
         bsc_trend += f"{i+1:2}h: {'█' * bars} {price} Gwei\n"
@@ -263,47 +246,47 @@ async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = eth_trend + bsc_trend
     await update.message.reply_text(message, parse_mode='Markdown')
 
-# Recommend command
+# /recommend komutu
 async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prices = get_gas_prices()
     if not prices:
-        await update.message.reply_text("❌ Error fetching gas prices.")
+        await update.message.reply_text("❌ Gaz fiyatları alınamadı.")
         return
     
-    eth_recommend = "🟢 Good to transact now!" if prices['eth'] <= GAS_THRESHOLDS['eth']['medium'] else "🔴 Wait for gas to drop below 40 Gwei"
-    bsc_recommend = "🟢 Good to transact now!" if prices['bsc'] <= GAS_THRESHOLDS['bsc']['medium'] else "🔴 Wait for gas to drop below 6 Gwei"
+    eth_recommend = "🟢 Şimdi işlem yapmak için uygun!" if prices['eth'] <= GAS_THRESHOLDS['eth']['orta'] else "🔴 Gaz 40 Gwei altına düşene kadar bekleyin"
+    bsc_recommend = "🟢 Şimdi işlem yapmak için uygun!" if prices['bsc'] <= GAS_THRESHOLDS['bsc']['orta'] else "🔴 Gaz 6 Gwei altına düşene kadar bekleyin"
     
     message = (
-        f"💡 *Transaction Recommendations* 💡\n\n"
+        f"💡 *İşlem Önerileri* 💡\n\n"
         f"🟣 *Ethereum:* {eth_recommend}\n"
-        f"Current: `{prices['eth']} Gwei`\n\n"
+        f"Güncel: `{prices['eth']} Gwei`\n\n"
         f"🟡 *BSC:* {bsc_recommend}\n"
-        f"Current: `{prices['bsc']} Gwei`\n\n"
-        f"_Based on current gas prices and historical trends_"
+        f"Güncel: `{prices['bsc']} Gwei`\n\n"
+        f"_Güncel gaz fiyatları ve geçmiş trendlere göre_"
     )
     await update.message.reply_text(message, parse_mode='Markdown')
 
-# About command
+# /about komutu
 async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = (
         f"⛽ *GasGuruBot v1.0* ⛽\n\n"
-        f"Built by a Telegram Expert & Web3 Developer 🚀\n\n"
-        f"*Features:*\n"
-        f"• Real-time ETH & BSC gas monitoring\n"
-        f"• Custom price alerts\n"
-        f"• 24-hour trend analysis\n"
-        f"• Smart transaction recommendations\n"
-        f"• No external APIs - pure blockchain RPC\n\n"
-        f"*Tech Stack:*\n"
+        f"Telegram Uzmanı & Web3 Geliştirici tarafından geliştirildi 🚀\n\n"
+        f"*Özellikler:*\n"
+        f"• Gerçek zamanlı ETH & BSC gaz takibi\n"
+        f"• Özel fiyat alarmları\n"
+        f"• 24 saatlik trend analizi\n"
+        f"• Akıllı işlem önerileri\n"
+        f"• Harici API yok - saf blockchain RPC\n\n"
+        f"*Teknoloji Yığını:*\n"
         f"• Python + python-telegram-bot\n"
-        f"• Web3.py for blockchain interaction\n"
-        f"• Redis for data persistence\n"
-        f"• Deployed on Railway\n\n"
-        f"_Support the project: ⭐ GitHub_"
+        f"• Web3.py blockchain etkileşimi için\n"
+        f"• Redis veri depolama için\n"
+        f"• Railway'de dağıtıldı\n\n"
+        f"_Projeyi destekleyin: ⭐ GitHub_"
     )
     await update.message.reply_text(message, parse_mode='Markdown')
 
-# Callback query handler
+# Buton handler
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -320,40 +303,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await recommend(update, context)
     elif data == 'set_alert':
         await query.edit_message_text(
-            "To set an alert, use:\n"
-            "`/alert <price>` for ETH (e.g., /alert 20)\n"
-            "`/alert bsc <price>` for BSC (e.g., /alert bsc 3)\n\n"
-            "You'll be notified when gas drops below your target!",
+            "Alarm ayarlamak için:\n"
+            "`/alert <fiyat>` - ETH için (örnek: /alert 20)\n"
+            "`/alert bsc <fiyat>` - BSC için (örnek: /alert bsc 3)\n\n"
+            "Gaz hedefinizin altına düştüğünde bildirim alacaksınız!",
             parse_mode='Markdown'
         )
 
-# Background task to check alerts
+# Arka plan alarm kontrolü
 async def check_alerts(app: Application):
     while True:
         try:
             prices = get_gas_prices()
             if prices:
-                # Check for alerts (simplified - in production use a proper user store)
                 chain_names = {'eth': 'Ethereum', 'bsc': 'BSC'}
                 for chain in ['eth', 'bsc']:
-                    # This is simplified - in production you'd maintain a list of users
-                    # For now, we'll just log
                     current_price = prices[chain]
-                    logger.info(f"Current {chain.upper()} gas: {current_price} Gwei")
-                    
-                    # You'd implement proper alert checking here
-                    # For a production bot, you'd store user alerts in Redis and iterate through them
+                    logger.info(f"Güncel {chain.upper()} gaz: {current_price} Gwei")
         except Exception as e:
-            logger.error(f"Error in alert checker: {e}")
+            logger.error(f"Alarm kontrol hatası: {e}")
         
-        await asyncio.sleep(60)  # Check every minute
+        await asyncio.sleep(60)
 
-# Main function
+# Ana fonksiyon
 def main():
-    # Create application
     application = Application.builder().token(os.getenv('BOT_TOKEN')).build()
     
-    # Add command handlers
+    # Komut handlerları
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("gas", gas))
     application.add_handler(CommandHandler("alert", set_alert_command))
@@ -362,10 +338,10 @@ def main():
     application.add_handler(CommandHandler("recommend", recommend))
     application.add_handler(CommandHandler("about", about))
     
-    # Add callback handler
+    # Buton handler
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    # Start bot
+    # Botu başlat
     application.run_polling()
 
 if __name__ == '__main__':
